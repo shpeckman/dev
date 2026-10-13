@@ -1,4 +1,5 @@
 # src/dev/project.cr
+require "json"
 require "yaml"
 require "./cli"
 require "./git"
@@ -21,11 +22,24 @@ module Dev::Project
 
   REMOVED = {"switch", "feature", "checkpoint"}
 
+  VISIBILITIES = {"public", "private"}
+
+  VISIBILITY_CONSEQUENCES = "changing visibility can lose stars and watchers, detach public forks, " \
+                            "disable push rulesets, and expose GitHub Actions history and logs"
+
   record TagPlan, name : String, create : Bool, push : Bool
+
+  record RemoteRepo, slug : String, url : String, visibility : String
 
   COMMANDS = [
     cmd("init", "",
       "initialize a git repository here (on `main`) and create its remote") { -> { cmd_init } },
+    cmd("clone", "<owner/name | url> [<dir>]",
+      "clone a GitHub repo, then land on dev", arity: 1..2) { |args|
+      source = args.positional[0]
+      dir    = args.positional[1]?
+      -> { cmd_clone(source, dir) }
+    },
     cmd("open", "",
       "sync main, checkout or create dev, fast-forward and push (remote auto-created)") { -> { cmd_open } },
     cmd("save", "-m MSG [--no-add] [--no-push]",
@@ -97,6 +111,24 @@ module Dev::Project
       else
         die "backup takes no arguments; see `dev backup --help`" if name
         -> { cmd_backup }
+      end
+    },
+    cmd("remote", "[--vis public|private | --del]",
+      "show origin's slug, URL and visibility; change its visibility or delete it",
+      [
+        Opt.new("vis", value: "public|private", help: "change visibility of origin's GitHub repo"),
+        Opt.new("del", help: "backup bundle, then delete origin's GitHub repo"),
+      ]) { |args|
+      vis = args["vis"]?
+      del = args.flag?("del")
+      die "--vis and --del are mutually exclusive" if vis && del
+      if vis
+        die "invalid visibility `#{vis}`; use `public` or `private`" unless VISIBILITIES.includes?(vis)
+        -> { cmd_visibility(vis) }
+      elsif del
+        -> { cmd_delete_remote }
+      else
+        -> { cmd_remote }
       end
     },
   ]
@@ -336,6 +368,73 @@ module Dev::Project
     0
   end
 
+  def clone_dir(source : String) : String
+    Path[source.rchop('/')].basename.rchop(".git")
+  end
+
+  def cmd_clone(source : String, dir : String?) : Int32
+    die "already inside a git repository" if in_repo?
+    require_gh
+    target = dir || clone_dir(source)
+    die "`#{target}` already exists" if File.exists?(target)
+    gh("repo", "clone", source, target)
+    status = Dir.cd(target) { cmd_open }
+    info "cloned into `#{target}`; run `cd #{target}`"
+    status
+  end
+
+  def origin_repo : RemoteRepo
+    die "no `origin` remote" unless has_origin?
+    require_gh
+    url  = git_stdout("remote", "get-url", "origin")
+    json = JSON.parse(gh("repo", "view", url, "--json", "nameWithOwner,visibility", capture: true).stdout)
+    RemoteRepo.new(json["nameWithOwner"].as_s, url, json["visibility"].as_s.downcase)
+  end
+
+  def cmd_remote : Int32
+    require_repo
+    repo = origin_repo
+    puts "#{Theme.heading("slug:")} #{Theme.accent(repo.slug)}"
+    puts "#{Theme.heading("url:")} #{repo.url}"
+    puts "#{Theme.heading("visibility:")} #{repo.visibility}"
+    0
+  end
+
+  def cmd_visibility(visibility : String) : Int32
+    require_repo
+    repo = origin_repo
+    if repo.visibility == visibility
+      info "`#{repo.slug}` is already #{visibility}"
+      return 0
+    end
+    note VISIBILITY_CONSEQUENCES
+    gh("repo", "edit", repo.slug, "--visibility", visibility, "--accept-visibility-change-consequences")
+    ok "`#{repo.slug}` is now #{visibility} (was #{repo.visibility})"
+    0
+  end
+
+  def cmd_delete_remote : Int32
+    require_repo
+    repo = origin_repo
+    git("fetch", "--tags", "origin")
+    make_bundle
+    if tags = remote_tags
+      unless tags.empty?
+        note "tags published on origin: #{tags.keys.map { |tag| "`#{tag}`" }.join(", ")}"
+        note "shards consumers lose these releases and must delete their cached copy of this repository " \
+             "under #{SHARDS_HOME} (shards never prunes deleted tags)"
+      end
+    end
+    unless gh("repo", "delete", repo.slug, check: false).success?
+      die "deleting `#{repo.slug}` failed; if the token lacks the `delete_repo` scope, " \
+          "run `gh auth refresh -h github.com -s delete_repo`"
+    end
+    ok "deleted GitHub repo `#{repo.slug}`; local history is untouched and backed up"
+    note "`origin` still points at the deleted repo, so pushes fail; `git remote remove origin` " \
+         "lets the next push create a new GitHub repo"
+    0
+  end
+
   def cmd_open : Int32
     require_repo
     require_clean_tracked "open"
@@ -347,6 +446,9 @@ module Dev::Project
     if local_branch_exists?(dev_branch)
       checkout dev_branch
       info "on existing `#{dev_branch}` (from `#{main}`)"
+    elsif remote_branch_exists?(dev_branch)
+      git("checkout", "-b", dev_branch, "--track", "origin/#{dev_branch}")
+      info "checked out `#{dev_branch}` from `origin/#{dev_branch}`"
     else
       git("checkout", "-b", dev_branch)
       info "created `#{dev_branch}` from `#{main}`"
