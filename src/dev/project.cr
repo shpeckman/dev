@@ -54,13 +54,15 @@ module Dev::Project
       no_push = args.flag?("no-push")
       -> { cmd_save(message, no_add, no_push) }
     },
-    cmd("undo", "[--hard]",
-      "revert the last commit or merge on dev and push",
+    cmd("undo", "[--hard] [--to REV]",
+      "revert the last commit or merge on dev and push, or restore dev's content to REV",
       [
         Opt.new("hard", help: "discard uncommitted changes first"),
+        Opt.new("to", value: "REV", help: "restore dev's content to REV as a new commit"),
       ]) { |args|
-      hard = args.flag?("hard")
-      -> { cmd_undo(hard) }
+      hard   = args.flag?("hard")
+      target = args["to"]?
+      -> { cmd_undo(hard, target) }
     },
     cmd("release", "[-m MSG] [options]",
       "bundle backup, squash-merge dev into main, tag the shard version, reconcile and push (remote auto-created)",
@@ -474,21 +476,29 @@ module Dev::Project
     0
   end
 
-  def cmd_undo(hard : Bool) : Int32
+  def cmd_undo(hard : Bool, target : String?) : Int32
     require_repo
     require_dev "undo"
-    dirty = [] of String
-    if hard
-      dirty = dirty_files
-      unless dirty.empty?
-        STDERR.puts Theme.warn("uncommitted changes (#{dirty.size} paths); discarding (--hard):")
-        dirty.first(20).each { |line| STDERR.puts "  #{line}" }
-        git("reset", "--hard", "HEAD")
-        git("clean", "-fd")
-      end
-    else
-      require_clean "undo"
-    end
+    require_clean "undo" unless hard
+    source    = target.try { |rev| restore_source(rev) }
+    discarded = hard && discard_changes
+    done, kept = source ? restore_to(source) : revert_last
+    push dev_branch
+    ok "#{done}#{discarded ? "; uncommitted changes discarded" : ""}; #{kept}"
+    0
+  end
+
+  def discard_changes : Bool
+    dirty = dirty_files
+    return false if dirty.empty?
+    STDERR.puts Theme.warn("uncommitted changes (#{dirty.size} paths); discarding (--hard):")
+    dirty.first(20).each { |line| STDERR.puts "  #{line}" }
+    git("reset", "--hard", "HEAD")
+    git("clean", "-fd")
+    true
+  end
+
+  def revert_last : {String, String}
     subject = git_stdout("log", "-1", "--format=%h %s")
     parents = git_stdout("rev-list", "--parents", "-n", "1", "HEAD").split.size - 1
     if parents > 1
@@ -496,13 +506,25 @@ module Dev::Project
     else
       git("revert", "--no-edit", "HEAD")
     end
-    push dev_branch
-    if hard && !dirty.empty?
-      ok "reverted `#{subject}` on `#{dev_branch}`; uncommitted changes discarded; the original commit stays in history"
-    else
-      ok "reverted `#{subject}` on `#{dev_branch}`; the original commit stays in history"
+    {"reverted `#{subject}` on `#{dev_branch}`", "the original commit stays in history"}
+  end
+
+  def restore_source(rev : String) : String
+    sha = resolve("#{rev}^{commit}") || die "`#{rev}` is not a commit"
+    if tree_of(sha) == tree_of("HEAD")
+      die "`#{dev_branch}` already matches `#{rev}`; nothing to restore"
     end
-    0
+    unless ancestor?(sha, dev_branch)
+      note "`#{sha[0, 10]}` is not in `#{dev_branch}`'s history; restoring its content anyway"
+    end
+    sha
+  end
+
+  def restore_to(sha : String) : {String, String}
+    label = git_stdout("log", "-1", "--format=%h (%s)", sha)
+    git("restore", "--source=#{sha}", "--staged", "--worktree", "--", ":/")
+    git("commit", "-m", "restore to #{label}")
+    {"restored `#{dev_branch}` to `#{label}`", "later commits stay in history"}
   end
 
   def pending_changes?(main : String) : Bool

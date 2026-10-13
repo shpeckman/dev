@@ -21,6 +21,7 @@ Orientation for AI agents working on this repository.
     `gh_repo_exists?`)
   - `Dev::Project` — the git-workflow commands (`init`/`clone`/`open`/`save`/
     `undo`/`release`/`status`/`backup`/`remote`) and their handlers, including
+    `undo --to` (`restore_source` validates, `restore_to` commits the restore),
     GitHub repo management (`origin_repo`, `--vis`, `--del`), release
     tagging from the `shard.yml` version (`TagPlan`, the version guard, the
     foreign-tag warning and the status version line)
@@ -37,7 +38,8 @@ Orientation for AI agents working on this repository.
 - Build: `shards build dev` (output in `bin/`, gitignored)
 - Install: `make install`
 - There is no spec suite; verify by running the built binary
-  (e.g. `./bin/dev status`, `./bin/dev release --dry-run -m "test"`).
+  (e.g. `./bin/dev status`, `./bin/dev release --dry-run -m "test"`,
+  `./bin/dev undo --to HEAD~2` in a scratch repository).
   For release tagging, use a scratch repository with a local bare repository
   as `origin` (`git init --bare`) and `$PROJECT_BACKUP_DIR` pointing at a
   scratch directory, so no GitHub remote or real backup is touched.
@@ -54,13 +56,15 @@ Orientation for AI agents working on this repository.
 - Never use `out` as an identifier — it is a reserved keyword.
 - The usage-facing API must be ergonomic.
 - Never touch the `version` field in `shard.yml`.
+- Prevent "shotgun surgery".
 - Keep `SKILL.md`, `README.md`, and this file in sync with the code.
 
 ## Git workflow
 
 Work happens on `dev` only; `main` is a publish target. Use the repo's own
 `dev` tool (`dev init` / `dev clone` / `dev open` / `dev save -m ...` /
-`dev status`) for commits; it pushes automatically. `dev init` (and any
+`dev status`) for commits; it pushes automatically. To return `dev` to an
+earlier state, use `dev undo --to REV` (a new commit, history kept). `dev init` (and any
 command that pushes) creates the GitHub remote via `gh` when `origin` is
 missing; default visibility is private (`$PROJECT_PUBLIC=1` makes it public,
 `$PROJECT_REMOTE` overrides the `owner/name` slug). Branches are never deleted.
