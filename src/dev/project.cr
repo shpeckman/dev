@@ -1,4 +1,5 @@
 # src/dev/project.cr
+require "yaml"
 require "./cli"
 require "./git"
 require "./graph"
@@ -14,7 +15,13 @@ module Dev::Project
   TITLE_LIMIT = 72
   TITLE_TAKE  = 3
 
+  SHARD_FILE  = "shard.yml"
+  VERSION_KEY = YAML::Any.new("version")
+  SHARDS_HOME = "~/.cache/shards/"
+
   REMOVED = {"switch", "feature", "checkpoint"}
+
+  record TagPlan, name : String, create : Bool, push : Bool
 
   COMMANDS = [
     cmd("init", "",
@@ -42,10 +49,11 @@ module Dev::Project
       -> { cmd_undo(hard) }
     },
     cmd("release", "[-m MSG] [options]",
-      "bundle backup, squash-merge dev into main, reconcile and push (remote auto-created)",
+      "bundle backup, squash-merge dev into main, tag the shard version, reconcile and push (remote auto-created)",
       [
         Opt.new("message", 'm', "MSG", "release title (default: auto-drafted)"),
         Opt.new("dry-run", help: "show the plan without running it"),
+        Opt.new("no-tag", help: "skip tagging the shard.yml version"),
         Opt.new("cancel", help: "back out of a conflicted release"),
         Opt.new("edit-title", help: "amend main's tip title; requires -m"),
       ]) { |args|
@@ -53,20 +61,22 @@ module Dev::Project
       cancel  = args.flag?("cancel")
       edit    = args.flag?("edit-title")
       dry_run = args.flag?("dry-run")
+      no_tag  = args.flag?("no-tag")
       die "--cancel takes no message" if cancel && message
       die "--edit-title requires -m MSG" if edit && !message
+      die "--no-tag applies only to a release" if no_tag && (cancel || edit)
       -> {
         if cancel
           cmd_release_cancel
         elsif edit
           cmd_edit_title(message.not_nil!, dry_run)
         else
-          cmd_release(message, dry_run)
+          cmd_release(message, dry_run, no_tag)
         end
       }
     },
     cmd("status", "[-n LIMIT]",
-      "show branch, dirty files, unpushed counts, last backup, and the commit graph",
+      "show branch, dirty files, unpushed counts, shard version, last backup, and the commit graph",
       [Opt.new("limit", 'n', "LIMIT", "graph depth (default: #{GRAPH_LIMIT})")]) { |args|
       raw   = args["limit"]?
       limit = raw ? (raw.to_i? || die "invalid LIMIT: #{raw}") : GRAPH_LIMIT
@@ -76,7 +86,7 @@ module Dev::Project
       "write a backup bundle of all refs",
       [
         Opt.new("list", help: "list bundles"),
-        Opt.new("restore", help: "restore a bundle's branches"),
+        Opt.new("restore", help: "restore a bundle's branches and tags"),
       ], arity: 0..1) { |args|
       name = args.positional[0]?
       if args.flag?("list")
@@ -134,10 +144,14 @@ module Dev::Project
     die "cannot #{action} on `#{branch}`; work happens on `#{dev_branch}` — run `dev open`"
   end
 
+  def remote_slug(name : String) : String
+    env_override("REMOTE") || name
+  end
+
   def ensure_origin!
     return if has_origin?
     die "no `origin` remote and the GitHub CLI (`gh`) is not installed" unless gh_available?
-    slug       = env_override("REMOTE") || repo_name
+    slug       = remote_slug(repo_name)
     top        = git_stdout("rev-parse", "--show-toplevel")
     visibility = env_override("PUBLIC") == "1" ? "--public" : "--private"
     info "no `origin` remote; creating GitHub repo `#{slug}`"
@@ -165,8 +179,7 @@ module Dev::Project
     Path[git_stdout("rev-parse", "--show-toplevel")].basename
   end
 
-  def backup_dir : Path
-    repo = repo_name
+  def backup_dir(repo : String = repo_name) : Path
     if override = env_override("BACKUP_DIR")
       return Path[override] / repo
     end
@@ -176,8 +189,7 @@ module Dev::Project
     share / "project" / "backups" / repo
   end
 
-  def bundles : Array(String)
-    dir = backup_dir
+  def bundles(dir : Path = backup_dir) : Array(String)
     Dir.exists?(dir.to_s) ? Dir.glob("#{dir}/*.bundle").sort : [] of String
   end
 
@@ -203,8 +215,119 @@ module Dev::Project
     git("checkout", branch)
   end
 
+  def shard_version(source : String) : String?
+    YAML.parse(source).as_h?.try(&.[VERSION_KEY]?).try(&.raw.to_s)
+  rescue YAML::ParseException
+    nil
+  end
+
+  def committed_version(rev : String) : String?
+    result = git("show", "#{rev}:#{SHARD_FILE}", check: false, capture: true)
+    result.success? ? shard_version(result.stdout) : nil
+  end
+
+  def worktree_version : String?
+    path = Path[git_stdout("rev-parse", "--show-toplevel")] / SHARD_FILE
+    File.file?(path) ? shard_version(File.read(path)) : nil
+  end
+
+  def version_tag(version : String) : String
+    "v#{version}"
+  end
+
+  def tree_of(commit : String) : String?
+    resolve("#{commit}^{tree}")
+  end
+
+  def history_anchors(main : String) : Array(String)
+    [main, dev_branch].flat_map { |branch| [branch, "origin/#{branch}"] }
+  end
+
+  def foreign_tags(main : String, remote : Hash(String, String)) : Array(String)
+    anchors = history_anchors(main)
+    remote.compact_map do |name, commit|
+      anchors.any? { |anchor| ancestor?(commit, anchor) } ? nil : name
+    end
+  end
+
+  def warn_foreign_tags(main : String, remote : Hash(String, String)?) : Nil
+    return unless remote
+    foreign = foreign_tags(main, remote)
+    return if foreign.empty?
+    note "tags on origin point outside this history: #{foreign.map { |tag| "`#{tag}`" }.join(", ")}"
+    note "shards consumers resolve these to old code; retag or delete them on origin, then consumers must " \
+         "delete their cached copy of this repository under #{SHARDS_HOME} (shards never prunes deleted tags)"
+  end
+
+  def plan_tag(version : String, remote : Hash(String, String)?) : TagPlan
+    name   = version_tag(version)
+    tree   = git_stdout("rev-parse", "#{dev_branch}^{tree}")
+    local  = resolve("#{TAG_REF}#{name}^{commit}")
+    shared = remote.try &.[name]?
+    {local, shared}.each do |commit|
+      next unless commit
+      next if tree_of(commit) == tree
+      die "`#{name}` (#{SHARD_FILE} version #{version}) is already released at #{commit[0, 10]} with other content; " \
+          "bump `version` in #{SHARD_FILE}, or release with --no-tag"
+    end
+    TagPlan.new(name, local.nil? && shared.nil?, shared.nil?)
+  end
+
+  def tag_steps(plan : TagPlan) : Array(String)
+    steps = [] of String
+    steps << "tag the release commit `#{plan.name}` (annotated, release title)" if plan.create
+    steps << "push tag `#{plan.name}`" if plan.push
+    steps << "`#{plan.name}` already tagged with this content; no new tag" unless plan.create || plan.push
+    steps
+  end
+
+  def apply_tag(plan : TagPlan, title : String) : Nil
+    if plan.create
+      git("tag", "-a", plan.name, "-m", title)
+      ok "tagged `#{plan.name}`"
+    end
+    if plan.push
+      git("push", "origin", "#{TAG_REF}#{plan.name}")
+      ok "pushed tag `#{plan.name}`"
+    end
+  end
+
+  def version_state(version : String) : String
+    name   = version_tag(version)
+    remote = has_origin? ? remote_tags : nil
+    local  = resolve("#{TAG_REF}#{name}^{commit}")
+    shared = remote.try &.[name]?
+    where  = if has_origin? && remote.nil?
+               " (origin unreachable)"
+             elsif local && !shared
+               " (local only, not pushed)"
+             else
+               ""
+             end
+    tagged = shared || local
+    return Theme.muted("#{name} not yet released#{where}").to_s unless tagged
+    tree = tree_of(tagged)
+    return Theme.warn("#{name} points outside this history#{where}").to_s unless tree
+    head = local_branch_exists?(dev_branch) ? dev_branch : "HEAD"
+    if tree == tree_of(head)
+      Theme.ok("#{name} released#{where}").to_s
+    else
+      Theme.warn("#{name} released; `#{head}` changed since — bump `version` before the next release#{where}").to_s
+    end
+  end
+
   def cmd_init : Int32
     die "already inside a git repository" if in_repo?
+    name = Path[Dir.current].basename
+    dir  = backup_dir(name)
+    if latest = bundles(dir).last?
+      die "backup bundles for `#{name}` exist in #{dir}; restore that history with " \
+          "`git clone #{latest}` instead of starting a new one"
+    end
+    slug = remote_slug(name)
+    if gh_available? && gh_repo_exists?(slug)
+      die "GitHub repo `#{slug}` already exists; clone it instead of starting a new history"
+    end
     main = default_main_branch
     git("init", "-b", main)
     git("commit", "--allow-empty", "-m", "initial commit")
@@ -230,6 +353,7 @@ module Dev::Project
     end
     git("pull", "--ff-only", "origin", dev_branch) if remote_branch_exists?(dev_branch)
     push dev_branch
+    warn_foreign_tags(main, remote_tags)
     ok "now on `#{dev_branch}`; save with `dev save -m ...`, release with `dev release`"
     0
   end
@@ -303,7 +427,7 @@ module Dev::Project
     end
   end
 
-  def cmd_release(message : String?, dry_run : Bool) : Int32
+  def cmd_release(message : String?, dry_run : Bool, no_tag : Bool) : Int32
     require_repo
     require_clean "release"
     main    = main_branch
@@ -311,7 +435,12 @@ module Dev::Project
     if current != dev_branch
       note "releasing from `#{current}`; `#{dev_branch}` is what gets merged into `#{main}`"
     end
-    title = message || (pending_changes?(main) ? auto_release_title(main) : nil)
+    git("fetch", "origin") if has_origin?
+    remote = has_origin? ? remote_tags : nil
+    warn_foreign_tags(main, remote)
+    title   = message || (pending_changes?(main) ? auto_release_title(main) : nil)
+    version = title && !no_tag ? committed_version(dev_branch) : nil
+    plan    = version ? plan_tag(version, remote) : nil
     commit_step = if title
                     "squash-merge `#{dev_branch}` into `#{main}`, commit: #{title.inspect}"
                   else
@@ -322,9 +451,10 @@ module Dev::Project
       "checkout `#{main}`, pull --ff-only",
       commit_step,
       "push `#{main}`",
-      "checkout `#{dev_branch}`, reconcile with `merge -s ours #{main}`",
-      "push every local branch",
     ]
+    steps.concat(tag_steps(plan)) if plan
+    steps << "checkout `#{dev_branch}`, reconcile with `merge -s ours #{main}`"
+    steps << "push every local branch"
     steps.unshift("create GitHub remote repo (`origin`)") unless has_origin?
     if dry_run
       puts Theme.heading("dry run; would:")
@@ -332,7 +462,6 @@ module Dev::Project
       return 0
     end
     make_bundle
-    git("fetch", "origin") if has_origin?
     checkout main
     git("pull", "--ff-only", "origin", main) if remote_branch_exists?(main)
     unless git("merge", "--squash", dev_branch, check: false).success?
@@ -352,6 +481,7 @@ module Dev::Project
         ok "`#{main}` updated: #{final}"
         note "title auto-drafted from save messages; fix with `dev release --edit-title -m \"...\"`"
       end
+      plan.try { |tag| apply_tag(tag, final) }
     end
     checkout dev_branch
     git("merge", "-s", "ours", "-m",
@@ -410,8 +540,12 @@ module Dev::Project
     git("push", "--force-with-lease", "origin", main)
     ok "`#{main}` tip reworded (was #{tip[0, 10]})"
     tags.each do |tag|
-      git("tag", "-f", tag)
-      git("push", "--force", "origin", "refs/tags/#{tag}")
+      if git_stdout("cat-file", "-t", "#{TAG_REF}#{tag}") == "tag"
+        git("tag", "-f", "-a", tag, "-m", message)
+      else
+        git("tag", "-f", tag)
+      end
+      git("push", "--force", "origin", "#{TAG_REF}#{tag}")
       info "tag `#{tag}` moved and force-pushed"
     end
 
@@ -445,10 +579,13 @@ module Dev::Project
     file   = resolve_bundle(name)
     prefix = "restore/#{Path[file].stem}/"
     git("bundle", "verify", file, capture: true)
-    git("fetch", file, "refs/heads/*:refs/heads/#{prefix}*", "^refs/heads/restore/*")
+    git("fetch", "--no-tags", file,
+      "refs/heads/*:refs/heads/#{prefix}*", "#{TAG_REF}*:#{TAG_REF}#{prefix}*",
+      "^refs/heads/restore/*", "^#{TAG_REF}restore/*")
     puts "#{Theme.heading("restored from")} #{file}:"
     local_branches(prefix).each { |b| puts "  #{Theme.accent(b)}" }
-    info "existing branches were not changed"
+    local_tags(prefix).each { |t| puts "  #{Theme.accent(t)} #{Theme.muted("(tag)")}" }
+    info "existing branches and tags were not changed"
     0
   end
 
@@ -460,6 +597,9 @@ module Dev::Project
     puts "#{Theme.heading("on:")} #{Theme.accent(branch)}"
     puts "#{Theme.heading("dirty:")} #{dirty.empty? ? Theme.ok("0 paths (clean)") : Theme.warn("#{dirty.size} paths")}"
     dirty.first(15).each { |line| puts "  #{line}" }
+    if version = worktree_version
+      puts "#{Theme.heading("version:")} #{version_state(version)}"
+    end
     puts "\n#{Theme.heading("branches (ahead of origin):")}"
     local_branches.each do |b|
       if remote_branch_exists?(b)

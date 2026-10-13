@@ -19,22 +19,44 @@ amend of `main`'s tip), and mutating operations refuse to run on a dirty tree â€
 except `undo --hard`, which discards the uncommitted changes.
 
 ```
-dev init                                 initialize a git repository here (on main) and create its remote
+dev init                                 initialize a git repository here (on main) and create its remote;
+                                         refuses when backup bundles or the GitHub repo already exist
 dev open                                 sync main, checkout or create dev, fast-forward and push
                                          (creates the remote if missing)
 dev save -m MSG [--no-add] [--no-push]   commit all changes on dev and push
 dev undo [--hard]                        revert the last commit or merge on dev and push;
                                          --hard discards uncommitted changes first
-dev release [-m MSG] [options]           bundle backup, squash-merge dev into main, reconcile and push
-                                         (creates the remote if missing)
+dev release [-m MSG] [options]           bundle backup, squash-merge dev into main, tag the shard.yml
+                                         version, reconcile and push (creates the remote if missing)
+dev release --no-tag                     release without tagging or the version guard
 dev release --cancel                     back out of a conflicted release, return to dev
 dev release --edit-title -m MSG          amend main's tip title (backup, tags moved, force-with-lease)
-dev status [-n LIMIT]                    show branch, dirty files, unpushed counts, last backup,
-                                         and the commit graph
+dev status [-n LIMIT]                    show branch, dirty files, shard version, unpushed counts,
+                                         last backup, and the commit graph
 dev backup                               write a backup bundle of all refs
 dev backup --list                        list backup bundles
-dev backup --restore [NAME]              restore a bundle's branches as restore/<stamp>/<branch>
+dev backup --restore [NAME]              restore a bundle's branches and tags as restore/<stamp>/<name>
 ```
+
+#### Release tags
+
+When `shard.yml` on `dev` has a `version`, `dev release` creates an annotated
+tag `v<version>` on the new `main` commit (message: the release title) and
+pushes only that tag. Shards resolves dependency versions from these tags.
+
+- Version guard: if `v<version>` already exists locally or on `origin` with
+  different content, the release is refused before anything changes â€” bump
+  `version` in `shard.yml` first (`dev` never edits it), or pass `--no-tag`.
+  A tag with identical content is left as is.
+- Foreign tags: `dev open` and `dev release` warn about tags on `origin` that
+  are not reachable from `main` or `dev` (the mark of a recreated history).
+  Shards never prunes deleted tags from its cache, so after such tags are
+  removed, consumers must delete their cached copy under `~/.cache/shards/`.
+- `dev status` shows the version state: not yet released, released, released
+  but changed since (bump before the next release), not pushed, outside this
+  history, or origin unreachable.
+- `dev release --edit-title` moves tags on `main`'s tip and keeps annotated
+  tags annotated, with the new title as message.
 
 Environment overrides: `$PROJECT_MAIN` (default: detected `main`/`master`),
 `$PROJECT_DEV` (default: `dev`), `$PROJECT_REMOTE` (default: directory name;

@@ -15,9 +15,12 @@ Orientation for AI agents working on this repository.
   - `Dev::Graph` — box-drawing/nerd-font commit-graph rendering with
     width-aware subject wrapping
   - `Dev::Terminal` — ioctl terminal width detection
-  - `Dev::Git` — shared git plumbing (`git`, `git_stdout`, branch helpers)
+  - `Dev::Git` — shared git plumbing (`git`, `git_stdout`, branch and tag
+    helpers, `resolve`, `ancestor?`, `remote_tags`, `gh_repo_exists?`)
   - `Dev::Project` — the git-workflow commands (`init`/`open`/`save`/`undo`/
-    `release`/`status`/`backup`) and their handlers
+    `release`/`status`/`backup`) and their handlers, including release
+    tagging from the `shard.yml` version (`TagPlan`, the version guard, the
+    foreign-tag warning and the status version line)
   - `Dev::Tok`, `Dev::Loc`, `Dev::Chlog` — the analysis commands
 - `shard.yml` — shard manifest; the single build `target` (`dev`) lives here
 - `makefile` — `make install` builds `src/tools/dev.cr` (release) into
@@ -32,6 +35,9 @@ Orientation for AI agents working on this repository.
 - Install: `make install`
 - There is no spec suite; verify by running the built binary
   (e.g. `./bin/dev status`, `./bin/dev release --dry-run -m "test"`).
+  For release tagging, use a scratch repository with a local bare repository
+  as `origin` (`git init --bare`) and `$PROJECT_BACKUP_DIR` pointing at a
+  scratch directory, so no GitHub remote or real backup is touched.
 
 ## Code standards
 
@@ -50,5 +56,7 @@ Work happens on `dev` only; `main` is a publish target. Use the repo's own
 for commits; it pushes automatically. `dev init` (and any command that
 pushes) creates the GitHub remote via `gh` when `origin` is missing; default
 visibility is private (`$PROJECT_PUBLIC=1` makes it public, `$PROJECT_REMOTE`
-overrides the `owner/name` slug). Branches are never deleted. See `SKILL.md`
+overrides the `owner/name` slug). Branches are never deleted. `dev release`
+tags `v<version>` from `shard.yml` and refuses to reuse a released version
+with different content; `dev` never edits `version`. See `SKILL.md`
 for the full workflow description.

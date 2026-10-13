@@ -5,6 +5,9 @@ module Dev::Git
   extend self
   include CLI
 
+  TAG_REF = "refs/tags/"
+  PEELED  = "^{}"
+
   record GitResult, status : Process::Status, stdout : String, stderr : String do
     def success?
       status.success?
@@ -49,6 +52,11 @@ module Dev::Git
     GitResult.new(status, "", "")
   end
 
+  def gh_repo_exists?(slug : String) : Bool
+    Process.run("gh", ["repo", "view", slug],
+      output: Process::Redirect::Close, error: Process::Redirect::Close).success?
+  end
+
   def in_repo? : Bool
     git("rev-parse", "--is-inside-work-tree", check: false, capture: true).success?
   end
@@ -71,6 +79,36 @@ module Dev::Git
 
   def local_branches(prefix : String = "") : Array(String)
     git_stdout("for-each-ref", "--format=%(refname:short)", "refs/heads/#{prefix}").lines
+  end
+
+  def local_tags(prefix : String = "") : Array(String)
+    git_stdout("for-each-ref", "--format=%(refname:lstrip=2)", "#{TAG_REF}#{prefix}").lines
+  end
+
+  def resolve(rev : String) : String?
+    result = git("rev-parse", "--verify", "--quiet", rev, check: false, capture: true)
+    result.success? ? result.stdout.strip : nil
+  end
+
+  def ancestor?(commit : String, of : String) : Bool
+    git("merge-base", "--is-ancestor", commit, of, check: false, capture: true).success?
+  end
+
+  def remote_tags : Hash(String, String)?
+    result = git("ls-remote", "--tags", "origin", check: false, capture: true)
+    return nil unless result.success?
+    tags = {} of String => String
+    result.stdout.each_line do |line|
+      sha, _, ref = line.partition('\t')
+      next unless ref.starts_with?(TAG_REF)
+      name = ref.lchop(TAG_REF)
+      if name.ends_with?(PEELED)
+        tags[name.rchop(PEELED)] = sha
+      else
+        tags.put_if_absent(name) { sha }
+      end
+    end
+    tags
   end
 
   def main_branch : String
