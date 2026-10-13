@@ -28,6 +28,8 @@ dev open                                 sync main, checkout or create dev, fast
 dev save -m MSG [--no-add] [--no-push]   commit all changes on dev and push
 dev undo [--hard]                        revert the last commit or merge on dev and push;
                                          --hard discards uncommitted changes first
+dev undo --to REV [--hard]               restore dev's content to REV (hash, tag, HEAD~N, ...)
+                                         as one new commit and push; later commits stay in history
 dev release [-m MSG] [options]           bundle backup, squash-merge dev into main, tag the shard.yml
                                          version, reconcile and push (creates the remote if missing)
 dev release --no-tag                     release without tagging or the version guard
@@ -42,6 +44,19 @@ dev remote                               show origin's GitHub slug, URL and visi
 dev remote --vis public|private          change the visibility of origin's GitHub repo
 dev remote --del                         backup bundle, then delete origin's GitHub repo
 ```
+
+#### Restoring to a commit
+
+`dev undo --to REV` makes `dev`'s files match `REV` exactly (files added after
+it are removed) and commits that as `restore to <sha> (<subject>)`, then
+pushes. Nothing is rewritten: the commits after `REV` stay in history, and the
+next `dev release` publishes the restored state to `main` like any other change.
+
+- Refuses when `REV` is not a commit, or when `dev` already matches it.
+- Without `--hard`, refuses on uncommitted changes; with `--hard`, discards
+  them first — only after `REV` has been validated.
+- Any commit git can resolve is accepted; a note is printed when `REV` is not
+  in `dev`'s history (e.g. a `restore/…` branch from a backup bundle).
 
 #### Remote repo
 
