@@ -2,13 +2,14 @@
 
 A Crystal shard providing a single `dev` CLI tool plus the shared `Dev`
 support library (`Dev::CLI`, `Dev::Theme`, `Dev::Graph`, `Dev::Terminal`,
-`Dev::Git`, `Dev::LLM`, `Dev::Proposal`) it is built on.
+`Dev::Git`, `Dev::Diff`, `Dev::LLM`, `Dev::Proposal`) it is built on.
 
 ## Tool
 
 `dev` is one command with flat subcommands: a two-branch git workflow
-(`init`/`clone`/`open`/`save`/`undo`/`release`/`status`/`backup`/`remote`) plus three analysis
-subcommands (`tok`/`loc`/`chlog`).
+(`init`/`clone`/`open`/`save`/`undo`/`release`/`status`/`backup`/`remote`),
+three DeepSeek-backed history commands (`find`/`explain`/`notes`), and three
+analysis subcommands (`tok`/`loc`/`chlog`).
 
 ### Git workflow
 
@@ -67,15 +68,25 @@ the commit message and, where allowed, a `shard.yml` version bump. Nothing is
 committed or edited until you accept. `dev release` never uses DeepSeek.
 
 ```
-proposal (deepseek-flash):
+proposal (deepseek-flash, 3.1k in / 42 out):
   message: add a dry-run flag to release
   version: 0.11.0 → 0.12.0 (minor)
   reason: new user-facing option; breaking changes are minor while major is 0
+  docs may need updating:
+    - README.md: the release synopsis does not list --dry-run
 accept? [y]es / [e]dit / [n]o:
 ```
 
 - The staged diff (`git diff --cached`) is sent. Lockfiles and minified
   assets are excluded, and patches beyond 48,000 characters are truncated.
+- Style: the last 20 non-merge commit subjects (skipping generated ones such
+  as `restore to …`, `Revert "…"`, `bump version to …`) are sent as examples,
+  so proposals follow your own wording.
+- Docs check: when the staged paths include `src/` but none of `README.md`,
+  `AGENTS.md`, `SKILL.md`, the existing ones among those files are sent too,
+  and statements the change makes stale are listed under "docs may need
+  updating". It is advisory; nothing is edited.
+- The header shows the model and the request's token usage.
 - A bump is offered only when `v<version>` is already tagged (locally or on
   `origin`), i.e. the released version must change before the next release.
 - The bump is computed locally with `SemanticVersion` (`patch`/`minor`/
@@ -140,8 +151,35 @@ public instead of private), `$PROJECT_BACKUP_DIR` (default
 `~/.local/share/project/backups/<repo>/`, falling back to the old
 `~/.local/share/gitflow/backups/<repo>/` when it exists), `$PROJECT_WIDTH`
 (help/graph wrap width; `0` disables), `$PROJECT_TREE=branch|box` (force graph
-glyph style), `$DEEPSEEK_API_KEY` (enables `save` proposals), `$PROJECT_LLM_MODEL`
-(default: `deepseek-flash`).
+glyph style), `$DEEPSEEK_API_KEY` (enables `save` proposals, `find`,
+`explain`, `notes`, and `tok --exact`), `$PROJECT_LLM_MODEL` (default:
+`deepseek-flash`).
+
+### History insight
+
+`find`, `explain` and `notes` are read-only: they change nothing in the
+repository. They need `$DEEPSEEK_API_KEY` but not a terminal, so their output
+can be piped. Progress and token usage go to stderr; results go to stdout.
+
+```
+dev find <description>... [-n LIMIT]     name the commit a description refers to (searches the last
+                                         LIMIT non-merge commits of dev, default 200)
+dev explain [<rev> | <range>]            explain a commit or range in plain language
+                                         (default: main..dev when dev has unreleased changes, else HEAD)
+dev notes [<tag>]                        draft markdown release notes for v<version> (default: latest)
+```
+
+- `find` sends subjects, dates and changed paths (`--name-status`), and prints
+  the match, the reason, and the `dev undo --to <sha>` command to restore it;
+  nothing is restored for you. A description of a state ("before I changed
+  the help wrapping") resolves to the newest commit that has that state. An
+  answer that is not among the searched commits is rejected.
+- `explain` takes any revision (`HEAD~2`, a tag, a sha) or range
+  (`v0.11.0..dev`); merges are shown against their first parent.
+- `notes` orders `v<version>` tags with `SemanticVersion`, diffs the tag
+  against the previous release (or the empty tree for the first), and prints
+  Breaking / Added / Changed / Fixed sections, e.g.
+  `dev notes > notes.md && gh release create v0.12.0 --notes-file notes.md`.
 
 ### tok
 
@@ -149,8 +187,16 @@ Estimates token counts for source code and text files, rendered as a
 directory tree.
 
 ```
-dev tok [<targets>...]
+dev tok [--exact] [<targets>...]
 ```
+
+By default the estimate is offline (file size ÷ 4). `--exact` counts real
+tokens for `$PROJECT_LLM_MODEL` through the DeepSeek API: every file is sent
+as one request (8 in parallel, `max_tokens` 1), and the chat-template overhead
+measured by a one-character probe is subtracted from each `prompt_tokens`.
+Empty files count as 0 without a request; a file whose request fails falls
+back to the estimate with a note. This sends your files to DeepSeek and is
+billed as input tokens.
 
 ### loc
 

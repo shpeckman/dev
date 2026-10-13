@@ -62,6 +62,10 @@ module Dev::Git
     git("rev-parse", "--is-inside-work-tree", check: false, capture: true).success?
   end
 
+  def require_repo
+    die "not inside a git repository" unless in_repo?
+  end
+
   def current_branch : String
     git_stdout("branch", "--show-current")
   end

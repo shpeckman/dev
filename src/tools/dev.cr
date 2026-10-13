@@ -10,8 +10,9 @@ module DevTool
   ABOUT = <<-ABOUT
   one tool for the dev workflow: a two-branch git
   workflow (init/clone/open/save/undo/release/status/
-  backup/remote) plus token, line, and changelog
-  analysis (tok/loc/chlog)
+  backup/remote), DeepSeek-backed history insight
+  (find/explain/notes), plus token, line, and
+  changelog analysis (tok/loc/chlog)
   ABOUT
 
   FOOTER = <<-FOOTER
@@ -21,13 +22,14 @@ module DevTool
              $PROJECT_PUBLIC=1 (create new remotes public),
              $PROJECT_WIDTH (0 disables graph/help wrapping),
              $PROJECT_TREE=branch|box (force graph glyphs)
-  proposals: $DEEPSEEK_API_KEY lets save without -m propose
-             a message and version bump in a terminal,
-             $PROJECT_LLM_MODEL (default: deepseek-flash)
+  deepseek:  $DEEPSEEK_API_KEY enables find, explain, notes,
+             tok --exact, and save proposals without -m
+             (terminal only), $PROJECT_LLM_MODEL (default:
+             deepseek-flash)
   FOOTER
 
   APP = App.new("dev", ABOUT, FOOTER,
-    Dev::Project::COMMANDS +
+    Dev::Project::COMMANDS + Dev::Insight::COMMANDS +
     [Dev::Tok::COMMAND, Dev::Loc::COMMAND, Dev::Chlog::COMMAND])
 
   def main(argv = ARGV) : Int32

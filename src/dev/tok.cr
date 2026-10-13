@@ -1,16 +1,21 @@
 # src/dev/tok.cr
 require "./cli"
 require "./terminal"
+require "./llm"
 
 module Dev::Tok
   extend self
   include CLI
 
-  COMMAND = cmd("tok", "[<targets>...]",
+  BYTES_PER_TOKEN = 4
+
+  COMMAND = cmd("tok", "[--exact] [<targets>...]",
     "estimate token counts for source and text files",
+    [Opt.new("exact", help: "count real DeepSeek tokens via the API (sends every file; needs $#{LLM::KEY_ENV})")],
     arity: 0..Int32::MAX) do |args|
     targets = args.positional.empty? ? ["."] : args.positional
-    -> { cmd_count(targets) }
+    exact   = args.flag?("exact")
+    -> { cmd_count(targets, exact) }
   end
 
   class Node
@@ -102,7 +107,27 @@ module Dev::Tok
     end
   end
 
-  def cmd_count(targets : Array(String)) : Int32
+  def estimate(file : String) : Int64
+    File.size(file).to_i64 // BYTES_PER_TOKEN
+  end
+
+  def exact_counts(files : Array(String)) : Array(Int64)
+    LLM.require_key
+    STDERR.puts Theme.markup("counting `#{LLM.model}` tokens for #{files.size} files via DeepSeek…")
+    counts = begin
+      LLM.token_counts(files.map { |file| File.read(file).scrub })
+    rescue ex : LLM::Failure
+      die "DeepSeek request failed: #{ex.message}"
+    end
+    files.map_with_index do |file, i|
+      counts[i] || begin
+        STDERR.puts Theme.markup("note: request failed; estimated: #{file}", :warn)
+        estimate(file)
+      end
+    end
+  end
+
+  def cmd_count(targets : Array(String), exact : Bool) : Int32
     files = [] of String
     targets.each { |t| collect_files(t, files) }
 
@@ -111,13 +136,13 @@ module Dev::Tok
       return 0
     end
 
-    root = Node.new(".", true)
+    root   = Node.new(".", true)
+    counts = exact ? exact_counts(files) : files.map { |file| estimate(file) }
 
-    files.each do |file|
-      tokens = File.size(file).to_i64 // 4
+    files.each_with_index do |file, i|
       clean_file = file.starts_with?("./") ? file[2..] : file
       parts = clean_file.split(File::SEPARATOR, remove_empty: true)
-      root.insert(parts, tokens)
+      root.insert(parts, counts[i])
     end
 
     columns = Dev::Terminal.columns || 80
@@ -127,7 +152,7 @@ module Dev::Tok
     root_pad = max_len - 1
     root_pad = 1 if root_pad < 1
 
-    total_str = "#{format_number(root.tokens).rjust(10)} tk total"
+    total_str = "#{format_number(root.tokens).rjust(10)} tk total#{exact ? " (#{LLM.model})" : ""}"
     puts ".#{" " * root_pad}#{Theme.ok(total_str)}"
 
     sorted = root.children.values.sort_by(&.name.downcase)

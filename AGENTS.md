@@ -18,15 +18,26 @@ Orientation for AI agents working on this repository.
   - `Dev::Git` — shared git/gh plumbing (`invoke` runs both tools; `git`,
     `git_stdout`, `gh` with inherited stdin for its prompts, `require_gh`,
     branch and tag helpers, `resolve`, `ancestor?`, `remote_tags`,
-    `gh_repo_exists?`)
-  - `Dev::LLM` — DeepSeek chat-completions client (`complete`, JSON output
-    mode, thinking disabled; `available?` = `$DEEPSEEK_API_KEY` set and
-    stdin/stdout are TTYs; `$PROJECT_LLM_MODEL`, default `deepseek-flash`);
-    failures raise `LLM::Failure`
+    `gh_repo_exists?`, `require_repo`)
+  - `Dev::Diff` — diff text for prompts: `stat`/`patch` append flags to a
+    base git command (`["diff", "--cached"]`, `["show", …]`), `patch`
+    excludes lockfiles and minified assets, `clip` truncates
+  - `Dev::LLM` — DeepSeek chat-completions client: `complete` (JSON output
+    mode, thinking disabled) returns a `Completion` with `Usage`;
+    `token_counts` measures `prompt_tokens` per text (8 fibers, probe-based
+    overhead); `label` formats model and usage; `available?` =
+    `$DEEPSEEK_API_KEY` set and stdin/stdout are TTYs; `require_key`;
+    `$PROJECT_LLM_MODEL`, default `deepseek-flash`; failures raise
+    `LLM::Failure`
   - `Dev::Proposal` — `dev save` only: builds the staged-diff `Context`
-    (`staged`), asks for a `Draft` (message, `Bump`, reason; the bump is
-    forced to `none` unless `bumpable`), computes versions with stdlib
-    `SemanticVersion`, and runs the y/e/n confirmation
+    (`staged`: recent subjects as style examples, `DOC_FILES` contents when
+    `src/` is staged without docs), asks for a `Draft` (message, `Bump`,
+    reason, stale-doc items, usage; the bump is forced to `none` unless
+    `bumpable`), computes versions with stdlib `SemanticVersion`, and runs
+    the y/e/n confirmation
+  - `Dev::Insight` — read-only DeepSeek commands `find`, `explain`, `notes`
+    (key required, no terminal required; status to stderr, results to
+    stdout)
   - `Dev::Project` — the git-workflow commands (`init`/`clone`/`open`/`save`/
     `undo`/`release`/`status`/`backup`/`remote`) and their handlers, including
     `undo --to` (`restore_source` validates, `restore_to` commits the restore),
@@ -36,7 +47,8 @@ Orientation for AI agents working on this repository.
     proposal hook (`propose_save_message`; a bump is allowed when
     `tag_commits` finds `v<version>`, and `write_version` rewrites the
     `version:` line). `release` never uses DeepSeek.
-  - `Dev::Tok`, `Dev::Loc`, `Dev::Chlog` — the analysis commands
+  - `Dev::Tok`, `Dev::Loc`, `Dev::Chlog` — the analysis commands (`tok
+    --exact` uses `LLM.token_counts`)
 - `shard.yml` — shard manifest; the single build `target` (`dev`) lives here
 - `makefile` — `make install` builds `src/tools/dev.cr` (release) into
   `~/.local/bin/dev` and copies `SKILL.md` to `~/.agents/skills/dev/`;
@@ -58,11 +70,17 @@ Orientation for AI agents working on this repository.
   that handles `repo clone` (clone the bare repository), `repo view` (print
   `{"nameWithOwner":…,"visibility":…}` JSON), `repo edit`, and `repo delete`
   (read the typed confirmation from stdin).
-  For DeepSeek proposals, build a scratch copy with `Dev::LLM::ENDPOINT`
-  pointed at a local stub server that returns
-  `{"choices":[{"message":{"content":"{\"message\":…,\"bump\":…,\"reason\":…}"},"finish_reason":"stop"}]}`,
-  and run `dev save` under a pseudo-terminal (proposals only run
-  when stdin and stdout are TTYs). Never test against the real API.
+  For DeepSeek features, build a scratch copy with `Dev::LLM::ENDPOINT`
+  pointed at a local stub server. JSON-mode requests (with
+  `response_format`) get
+  `{"choices":[{"message":{"content":"<json reply>"},"finish_reason":"stop"}],"usage":{"prompt_tokens":…,"completion_tokens":…}}`,
+  with the reply shape chosen by the system prompt (save: `message`/`bump`/
+  `reason`/`docs`; find: `commit`/`reason`; explain: `summary`/`changes`;
+  notes: `breaking`/`added`/`changed`/`fixed`). Count requests (no
+  `response_format`, `max_tokens` 1) only need `usage.prompt_tokens`. Run
+  `dev save` under a pseudo-terminal (proposals only run when stdin and
+  stdout are TTYs); `find`/`explain`/`notes`/`tok --exact` run piped. Never
+  test against the real API.
 
 ## Code standards
 
@@ -80,7 +98,9 @@ Orientation for AI agents working on this repository.
 Work happens on `dev` only; `main` is a publish target. Use the repo's own
 `dev` tool (`dev init` / `dev clone` / `dev open` / `dev save -m ...` /
 `dev status`) for commits; it pushes automatically. Agents always pass `-m`:
-DeepSeek proposals run only in a real terminal. To return `dev` to an
+DeepSeek proposals run only in a real terminal. `dev find`, `dev explain`,
+`dev notes` and `dev tok --exact` send repository content to DeepSeek; run
+them only when the user asks. To return `dev` to an
 earlier state, use `dev undo --to REV` (a new commit, history kept). `dev init` (and any
 command that pushes) creates the GitHub remote via `gh` when `origin` is
 missing; default visibility is private (`$PROJECT_PUBLIC=1` makes it public,
