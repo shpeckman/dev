@@ -1,0 +1,14 @@
+# shard.yml
+name: dev
+version: 0.9.0
+
+authors:
+  - shpeckman <geelenrobin@proton.me>
+
+crystal: '>= 1.21.0'
+
+license: MIT
+
+targets:
+  dev:
+    main: src/tools/dev.cr
