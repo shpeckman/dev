@@ -14,25 +14,27 @@ module Dev::Git
     end
   end
 
-  def git(*args : String, check : Bool = true, capture : Bool = false) : GitResult
-    if capture
-      stdout = IO::Memory.new
-      stderr = IO::Memory.new
-      status = Process.run("git", args.to_a, output: stdout, error: stderr)
-      result = GitResult.new(status, stdout.to_s, stderr.to_s)
-      if check && !result.success?
-        STDERR.print result.stderr unless result.stderr.empty?
-        die "`git #{args.join(" ")}` failed (exit #{status.exit_code})"
-      end
-      result
-    else
-      status = Process.run("git", args.to_a,
-        output: Process::Redirect::Inherit, error: Process::Redirect::Inherit)
-      if check && !status.success?
-        die "`git #{args.join(" ")}` failed (exit #{status.exit_code})"
-      end
-      GitResult.new(status, "", "")
+  def invoke(tool : String, args : Array(String), check : Bool, capture : Bool,
+             input : Process::Stdio = Process::Redirect::Close) : GitResult
+    result = if capture
+               stdout = IO::Memory.new
+               stderr = IO::Memory.new
+               status = Process.run(tool, args, input: input, output: stdout, error: stderr)
+               GitResult.new(status, stdout.to_s, stderr.to_s)
+             else
+               status = Process.run(tool, args, input: input,
+                 output: Process::Redirect::Inherit, error: Process::Redirect::Inherit)
+               GitResult.new(status, "", "")
+             end
+    if check && !result.success?
+      STDERR.print result.stderr unless result.stderr.empty?
+      die "`#{tool} #{args.join(" ")}` failed (exit #{result.status.exit_code})"
     end
+    result
+  end
+
+  def git(*args : String, check : Bool = true, capture : Bool = false) : GitResult
+    invoke("git", args.to_a, check, capture)
   end
 
   def git_stdout(*args : String) : String
@@ -43,18 +45,17 @@ module Dev::Git
     !Process.find_executable("gh").nil?
   end
 
-  def gh(*args : String, check : Bool = true) : GitResult
-    status = Process.run("gh", args.to_a,
-      output: Process::Redirect::Inherit, error: Process::Redirect::Inherit)
-    if check && !status.success?
-      die "`gh #{args.join(" ")}` failed (exit #{status.exit_code})"
-    end
-    GitResult.new(status, "", "")
+  def require_gh
+    die "the GitHub CLI (`gh`) is not installed" unless gh_available?
+  end
+
+  def gh(*args : String, check : Bool = true, capture : Bool = false) : GitResult
+    invoke("gh", args.to_a, check, capture,
+      capture ? Process::Redirect::Close : Process::Redirect::Inherit)
   end
 
   def gh_repo_exists?(slug : String) : Bool
-    Process.run("gh", ["repo", "view", slug],
-      output: Process::Redirect::Close, error: Process::Redirect::Close).success?
+    gh("repo", "view", slug, check: false, capture: true).success?
   end
 
   def in_repo? : Bool

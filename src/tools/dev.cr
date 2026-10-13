@@ -9,9 +9,9 @@ module DevTool
 
   ABOUT = <<-ABOUT
   one tool for the dev workflow: a two-branch git
-  workflow (init/open/save/undo/release/status/backup)
-  plus token, line, and changelog analysis
-  (tok/loc/chlog)
+  workflow (init/clone/open/save/undo/release/status/
+  backup/remote) plus token, line, and changelog
+  analysis (tok/loc/chlog)
   ABOUT
 
   FOOTER = <<-FOOTER

@@ -7,7 +7,7 @@ support library (`Dev::CLI`, `Dev::Theme`, `Dev::Graph`, `Dev::Terminal`,
 ## Tool
 
 `dev` is one command with flat subcommands: a two-branch git workflow
-(`init`/`open`/`save`/`undo`/`release`/`status`/`backup`) plus three analysis
+(`init`/`clone`/`open`/`save`/`undo`/`release`/`status`/`backup`/`remote`) plus three analysis
 subcommands (`tok`/`loc`/`chlog`).
 
 ### Git workflow
@@ -16,11 +16,13 @@ The model: all work happens on `dev`; `main` is a publish target of clean
 squash-merged releases and is never worked on directly. Feature branches do not
 exist. Branches are never deleted, nothing is force-pushed (except one guarded
 amend of `main`'s tip), and mutating operations refuse to run on a dirty tree —
-except `undo --hard`, which discards the uncommitted changes.
+except `undo --hard`, which discards the uncommitted changes. The GitHub repo
+itself is only deleted by an explicit `remote --del`, after a backup bundle.
 
 ```
 dev init                                 initialize a git repository here (on main) and create its remote;
                                          refuses when backup bundles or the GitHub repo already exist
+dev clone <owner/name | url> [<dir>]     clone a GitHub repo, then land on dev (runs dev open)
 dev open                                 sync main, checkout or create dev, fast-forward and push
                                          (creates the remote if missing)
 dev save -m MSG [--no-add] [--no-push]   commit all changes on dev and push
@@ -36,7 +38,30 @@ dev status [-n LIMIT]                    show branch, dirty files, shard version
 dev backup                               write a backup bundle of all refs
 dev backup --list                        list backup bundles
 dev backup --restore [NAME]              restore a bundle's branches and tags as restore/<stamp>/<name>
+dev remote                               show origin's GitHub slug, URL and visibility
+dev remote --vis public|private          change the visibility of origin's GitHub repo
+dev remote --del                         backup bundle, then delete origin's GitHub repo
 ```
+
+#### Remote repo
+
+`dev clone` and `dev remote` require the GitHub CLI (`gh`), installed and
+authenticated.
+
+- `dev clone` clones via `gh repo clone` into `<dir>` (default: the repository
+  name) and runs `dev open` inside it; `dev` is checked out from `origin/dev`
+  when it exists. Refuses inside a git repository or when `<dir>` exists.
+- `dev remote` resolves the GitHub repo from `origin`'s URL, not the directory
+  name.
+- `--vis` is a no-op when the visibility is already set, and prints the
+  consequences of a change (lost stars and watchers, detached public forks,
+  disabled push rulesets, exposed GitHub Actions history and logs).
+- `--del` fetches `origin` with tags, writes a backup bundle, warns about tags
+  published on `origin` (shards consumers lose those releases), then lets `gh`
+  prompt for the repo name as confirmation. It needs the `delete_repo` token
+  scope (`gh auth refresh -h github.com -s delete_repo`). Local history and the
+  `origin` remote are kept; `git remote remove origin` lets the next push
+  create a new GitHub repo.
 
 #### Release tags
 
