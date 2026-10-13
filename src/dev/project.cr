@@ -143,10 +143,6 @@ module Dev::Project
     ENV["PROJECT_#{name}"]?
   end
 
-  def require_repo
-    die "not inside a git repository" unless in_repo?
-  end
-
   def require_branch : String
     branch = current_branch
     die "detached HEAD; checkout a branch first" if branch.empty?
