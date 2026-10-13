@@ -23,19 +23,19 @@ Orientation for AI agents working on this repository.
     mode, thinking disabled; `available?` = `$DEEPSEEK_API_KEY` set and
     stdin/stdout are TTYs; `$PROJECT_LLM_MODEL`, default `deepseek-flash`);
     failures raise `LLM::Failure`
-  - `Dev::Proposal` — builds the diff context (`Context`, `Task`), asks for a
-    `Draft` (message, `Bump`, reason), clamps the bump to the allowed
-    `floor..ceiling`, computes versions with stdlib `SemanticVersion`, and
-    runs the y/e/n confirmation
+  - `Dev::Proposal` — `dev save` only: builds the staged-diff `Context`
+    (`staged`), asks for a `Draft` (message, `Bump`, reason; the bump is
+    forced to `none` unless `bumpable`), computes versions with stdlib
+    `SemanticVersion`, and runs the y/e/n confirmation
   - `Dev::Project` — the git-workflow commands (`init`/`clone`/`open`/`save`/
     `undo`/`release`/`status`/`backup`/`remote`) and their handlers, including
     `undo --to` (`restore_source` validates, `restore_to` commits the restore),
     GitHub repo management (`origin_repo`, `--vis`, `--del`), release
     tagging from the `shard.yml` version (`TagPlan`, the version guard, the
-    foreign-tag warning and the status version line), and the proposal hooks
-    (`propose_save_message`, `propose_release_title`, `proposal_context` sets
-    the bump range from `tag_commits`/`tag_conflict`, `write_version` rewrites
-    the `version:` line)
+    foreign-tag warning and the status version line), and the `save`
+    proposal hook (`propose_save_message`; a bump is allowed when
+    `tag_commits` finds `v<version>`, and `write_version` rewrites the
+    `version:` line). `release` never uses DeepSeek.
   - `Dev::Tok`, `Dev::Loc`, `Dev::Chlog` — the analysis commands
 - `shard.yml` — shard manifest; the single build `target` (`dev`) lives here
 - `makefile` — `make install` builds `src/tools/dev.cr` (release) into
@@ -61,7 +61,7 @@ Orientation for AI agents working on this repository.
   For DeepSeek proposals, build a scratch copy with `Dev::LLM::ENDPOINT`
   pointed at a local stub server that returns
   `{"choices":[{"message":{"content":"{\"message\":…,\"bump\":…,\"reason\":…}"},"finish_reason":"stop"}]}`,
-  and run `dev save`/`dev release` under a pseudo-terminal (proposals only run
+  and run `dev save` under a pseudo-terminal (proposals only run
   when stdin and stdout are TTYs). Never test against the real API.
 
 ## Code standards
@@ -90,5 +90,5 @@ deletes the GitHub repo (bundle backup first, `gh` confirmation, `delete_repo`
 scope) — run it only at the user's explicit request. `dev release` tags
 `v<version>` from `shard.yml` and refuses to reuse a released version with
 different content; `dev` edits `version` only when the user accepts a
-DeepSeek proposal in a terminal. See `SKILL.md` for the full workflow
+DeepSeek proposal during `dev save` in a terminal. See `SKILL.md` for the full workflow
 description.
