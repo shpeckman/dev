@@ -14,7 +14,7 @@ install: $(TOOLS_BIN) $(SKILL) ## Builds and installs all tools and the dev skil
 
 ~/.local/bin/%: src/tools/%.cr FORCE
 	@mkdir -p ~/.local/bin
-	crystal build --release --no-debug $< -o $@
+	crystal build --progress --release --no-debug $< -o $@
 
 $(SKILL): SKILL.md FORCE
 	@mkdir -p $(dir $(SKILL))
