@@ -19,12 +19,23 @@ Orientation for AI agents working on this repository.
     `git_stdout`, `gh` with inherited stdin for its prompts, `require_gh`,
     branch and tag helpers, `resolve`, `ancestor?`, `remote_tags`,
     `gh_repo_exists?`)
+  - `Dev::LLM` — DeepSeek chat-completions client (`complete`, JSON output
+    mode, thinking disabled; `available?` = `$DEEPSEEK_API_KEY` set and
+    stdin/stdout are TTYs; `$PROJECT_LLM_MODEL`, default `deepseek-flash`);
+    failures raise `LLM::Failure`
+  - `Dev::Proposal` — builds the diff context (`Context`, `Task`), asks for a
+    `Draft` (message, `Bump`, reason), clamps the bump to the allowed
+    `floor..ceiling`, computes versions with stdlib `SemanticVersion`, and
+    runs the y/e/n confirmation
   - `Dev::Project` — the git-workflow commands (`init`/`clone`/`open`/`save`/
     `undo`/`release`/`status`/`backup`/`remote`) and their handlers, including
     `undo --to` (`restore_source` validates, `restore_to` commits the restore),
     GitHub repo management (`origin_repo`, `--vis`, `--del`), release
     tagging from the `shard.yml` version (`TagPlan`, the version guard, the
-    foreign-tag warning and the status version line)
+    foreign-tag warning and the status version line), and the proposal hooks
+    (`propose_save_message`, `propose_release_title`, `proposal_context` sets
+    the bump range from `tag_commits`/`tag_conflict`, `write_version` rewrites
+    the `version:` line)
   - `Dev::Tok`, `Dev::Loc`, `Dev::Chlog` — the analysis commands
 - `shard.yml` — shard manifest; the single build `target` (`dev`) lives here
 - `makefile` — `make install` builds `src/tools/dev.cr` (release) into
@@ -47,6 +58,11 @@ Orientation for AI agents working on this repository.
   that handles `repo clone` (clone the bare repository), `repo view` (print
   `{"nameWithOwner":…,"visibility":…}` JSON), `repo edit`, and `repo delete`
   (read the typed confirmation from stdin).
+  For DeepSeek proposals, build a scratch copy with `Dev::LLM::ENDPOINT`
+  pointed at a local stub server that returns
+  `{"choices":[{"message":{"content":"{\"message\":…,\"bump\":…,\"reason\":…}"},"finish_reason":"stop"}]}`,
+  and run `dev save`/`dev release` under a pseudo-terminal (proposals only run
+  when stdin and stdout are TTYs). Never test against the real API.
 
 ## Code standards
 
@@ -63,7 +79,8 @@ Orientation for AI agents working on this repository.
 
 Work happens on `dev` only; `main` is a publish target. Use the repo's own
 `dev` tool (`dev init` / `dev clone` / `dev open` / `dev save -m ...` /
-`dev status`) for commits; it pushes automatically. To return `dev` to an
+`dev status`) for commits; it pushes automatically. Agents always pass `-m`:
+DeepSeek proposals run only in a real terminal. To return `dev` to an
 earlier state, use `dev undo --to REV` (a new commit, history kept). `dev init` (and any
 command that pushes) creates the GitHub remote via `gh` when `origin` is
 missing; default visibility is private (`$PROJECT_PUBLIC=1` makes it public,
@@ -72,5 +89,6 @@ missing; default visibility is private (`$PROJECT_PUBLIC=1` makes it public,
 deletes the GitHub repo (bundle backup first, `gh` confirmation, `delete_repo`
 scope) — run it only at the user's explicit request. `dev release` tags
 `v<version>` from `shard.yml` and refuses to reuse a released version with
-different content; `dev` never edits `version`. See `SKILL.md` for the full
-workflow description.
+different content; `dev` edits `version` only when the user accepts a
+DeepSeek proposal in a terminal. See `SKILL.md` for the full workflow
+description.

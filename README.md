@@ -2,7 +2,7 @@
 
 A Crystal shard providing a single `dev` CLI tool plus the shared `Dev`
 support library (`Dev::CLI`, `Dev::Theme`, `Dev::Graph`, `Dev::Terminal`,
-`Dev::Git`) it is built on.
+`Dev::Git`, `Dev::LLM`, `Dev::Proposal`) it is built on.
 
 ## Tool
 
@@ -25,7 +25,8 @@ dev init                                 initialize a git repository here (on ma
 dev clone <owner/name | url> [<dir>]     clone a GitHub repo, then land on dev (runs dev open)
 dev open                                 sync main, checkout or create dev, fast-forward and push
                                          (creates the remote if missing)
-dev save -m MSG [--no-add] [--no-push]   commit all changes on dev and push
+dev save [-m MSG] [--no-add] [--no-push] commit all changes on dev and push (-m optional in a
+                                         terminal with $DEEPSEEK_API_KEY: message proposed)
 dev undo [--hard]                        revert the last commit or merge on dev and push;
                                          --hard discards uncommitted changes first
 dev undo --to REV [--hard]               restore dev's content to REV (hash, tag, HEAD~N, ...)
@@ -58,6 +59,47 @@ next `dev release` publishes the restored state to `main` like any other change.
 - Any commit git can resolve is accepted; a note is printed when `REV` is not
   in `dev`'s history (e.g. a `restore/…` branch from a backup bundle).
 
+#### DeepSeek proposals
+
+When `DEEPSEEK_API_KEY` is set, `-m` is omitted, and `dev` runs in a real
+terminal (stdin and stdout are both TTYs), `dev save` and `dev release` ask
+DeepSeek to propose the commit message or release title and, where allowed, a
+`shard.yml` version bump. Nothing is committed or edited until you accept.
+
+```
+proposal (deepseek-flash):
+  message: add a dry-run flag to release
+  version: 0.11.0 → 0.12.0 (minor)
+  reason: new user-facing option; breaking changes are minor while major is 0
+accept? [y]es / [e]dit / [n]o:
+```
+
+- `save` sends the staged diff (`git diff --cached`); `release` sends the
+  `main..dev` diff plus the save subjects being released. Lockfiles and
+  minified assets are excluded, and patches beyond 48,000 characters are
+  truncated.
+- A bump is offered only when `v<version>` is already tagged (locally or on
+  `origin`). On `release`, if that tag holds other content (the version guard
+  would refuse), the bump is at least `patch`.
+- The bump is computed locally with `SemanticVersion` (`patch`/`minor`/
+  `major`); the model only picks the level. A `version` that is not a valid
+  semantic version gets a message-only proposal.
+- Accepting a bump rewrites only the top-level `version:` line of `shard.yml`
+  (quotes and trailing comments kept). On `save` it is part of the same
+  commit; on `release` it is committed on `dev` as `bump version to X.Y.Z`
+  before the bundle and squash merge, so the tag matches.
+- `edit` lets you retype the message (enter keeps it) and pick another
+  allowed bump; `no` aborts — `save` leaves your changes staged, `release`
+  changes nothing.
+- When the request fails (network, HTTP error, empty or invalid reply), `save`
+  stops and asks for `-m MSG`, and `release` falls back to the auto-drafted
+  title.
+- `release --dry-run` never contacts DeepSeek; it lists the proposal step.
+- Outside a terminal (pipes, scripts, agents) nothing changes: `save` requires
+  `-m MSG` and `release` auto-drafts its title.
+- The model defaults to `deepseek-flash` (non-thinking, JSON output mode);
+  override it with `$PROJECT_LLM_MODEL`. Diffs are sent to DeepSeek's API.
+
 #### Remote repo
 
 `dev clone` and `dev remote` require the GitHub CLI (`gh`), installed and
@@ -86,7 +128,8 @@ pushes only that tag. Shards resolves dependency versions from these tags.
 
 - Version guard: if `v<version>` already exists locally or on `origin` with
   different content, the release is refused before anything changes — bump
-  `version` in `shard.yml` first (`dev` never edits it), or pass `--no-tag`.
+  `version` in `shard.yml` first, or pass `--no-tag`. `dev` edits `version`
+  only when you accept a DeepSeek proposal in a terminal.
   A tag with identical content is left as is.
 - Foreign tags: `dev open` and `dev release` warn about tags on `origin` that
   are not reachable from `main` or `dev` (the mark of a recreated history).
@@ -105,7 +148,8 @@ public instead of private), `$PROJECT_BACKUP_DIR` (default
 `~/.local/share/project/backups/<repo>/`, falling back to the old
 `~/.local/share/gitflow/backups/<repo>/` when it exists), `$PROJECT_WIDTH`
 (help/graph wrap width; `0` disables), `$PROJECT_TREE=branch|box` (force graph
-glyph style).
+glyph style), `$DEEPSEEK_API_KEY` (enables proposals), `$PROJECT_LLM_MODEL`
+(default: `deepseek-flash`).
 
 ### tok
 

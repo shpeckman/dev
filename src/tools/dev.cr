@@ -21,6 +21,9 @@ module DevTool
              $PROJECT_PUBLIC=1 (create new remotes public),
              $PROJECT_WIDTH (0 disables graph/help wrapping),
              $PROJECT_TREE=branch|box (force graph glyphs)
+  proposals: $DEEPSEEK_API_KEY lets save and release without -m
+             propose a message and version bump in a terminal,
+             $PROJECT_LLM_MODEL (default: deepseek-flash)
   FOOTER
 
   APP = App.new("dev", ABOUT, FOOTER,

@@ -5,6 +5,8 @@ require "./cli"
 require "./git"
 require "./graph"
 require "./terminal"
+require "./llm"
+require "./proposal"
 
 module Dev::Project
   extend self
@@ -16,8 +18,9 @@ module Dev::Project
   TITLE_LIMIT = 72
   TITLE_TAKE  = 3
 
-  SHARD_FILE  = "shard.yml"
-  VERSION_KEY = YAML::Any.new("version")
+  SHARD_FILE   = "shard.yml"
+  VERSION_KEY  = YAML::Any.new("version")
+  VERSION_LINE = /(?m)^(version:[ \t]*)(["']?)[^\s"'#]+\2/
   SHARDS_HOME = "~/.cache/shards/"
 
   REMOVED = {"switch", "feature", "checkpoint"}
@@ -42,14 +45,15 @@ module Dev::Project
     },
     cmd("open", "",
       "sync main, checkout or create dev, fast-forward and push (remote auto-created)") { -> { cmd_open } },
-    cmd("save", "-m MSG [--no-add] [--no-push]",
-      "commit all changes on dev and push",
+    cmd("save", "[-m MSG] [--no-add] [--no-push]",
+      "commit all changes on dev and push (message proposed by DeepSeek when -m is omitted in a terminal)",
       [
-        Opt.new("message", 'm', "MSG", "commit message", required: true),
+        Opt.new("message", 'm', "MSG", "commit message (default: proposed in a terminal with $#{LLM::KEY_ENV})"),
         Opt.new("no-add", help: "commit only staged changes"),
         Opt.new("no-push", help: "skip the push"),
       ]) { |args|
-      message = args["message"]
+      message = args["message"]?
+      die "save requires -m MSG" unless message || LLM.available?
       no_add  = args.flag?("no-add")
       no_push = args.flag?("no-push")
       -> { cmd_save(message, no_add, no_push) }
@@ -67,7 +71,7 @@ module Dev::Project
     cmd("release", "[-m MSG] [options]",
       "bundle backup, squash-merge dev into main, tag the shard version, reconcile and push (remote auto-created)",
       [
-        Opt.new("message", 'm', "MSG", "release title (default: auto-drafted)"),
+        Opt.new("message", 'm', "MSG", "release title (default: proposed in a terminal with $#{LLM::KEY_ENV}, else auto-drafted)"),
         Opt.new("dry-run", help: "show the plan without running it"),
         Opt.new("no-tag", help: "skip tagging the shard.yml version"),
         Opt.new("cancel", help: "back out of a conflicted release"),
@@ -260,9 +264,21 @@ module Dev::Project
     result.success? ? shard_version(result.stdout) : nil
   end
 
+  def shard_path : Path
+    Path[git_stdout("rev-parse", "--show-toplevel")] / SHARD_FILE
+  end
+
   def worktree_version : String?
-    path = Path[git_stdout("rev-parse", "--show-toplevel")] / SHARD_FILE
+    path = shard_path
     File.file?(path) ? shard_version(File.read(path)) : nil
+  end
+
+  def write_version(version : String) : Nil
+    path   = shard_path
+    source = File.file?(path) ? File.read(path) : ""
+    die "no top-level `version` line in #{SHARD_FILE}" unless source.matches?(VERSION_LINE)
+    File.write(path, source.sub(VERSION_LINE) { |_, match| "#{match[1]}#{match[2]}#{version}#{match[2]}" })
+    git("add", "--", path.to_s)
   end
 
   def version_tag(version : String) : String
@@ -293,18 +309,42 @@ module Dev::Project
          "delete their cached copy of this repository under #{SHARDS_HOME} (shards never prunes deleted tags)"
   end
 
+  def tag_commits(name : String, remote : Hash(String, String)?) : {String?, String?}
+    {resolve("#{TAG_REF}#{name}^{commit}"), remote.try &.[name]?}
+  end
+
+  def tag_conflict(name : String, remote : Hash(String, String)?) : String?
+    tree = git_stdout("rev-parse", "#{dev_branch}^{tree}")
+    tag_commits(name, remote).find { |commit| commit && tree_of(commit) != tree }
+  end
+
   def plan_tag(version : String, remote : Hash(String, String)?) : TagPlan
-    name   = version_tag(version)
-    tree   = git_stdout("rev-parse", "#{dev_branch}^{tree}")
-    local  = resolve("#{TAG_REF}#{name}^{commit}")
-    shared = remote.try &.[name]?
-    {local, shared}.each do |commit|
-      next unless commit
-      next if tree_of(commit) == tree
+    name = version_tag(version)
+    if commit = tag_conflict(name, remote)
       die "`#{name}` (#{SHARD_FILE} version #{version}) is already released at #{commit[0, 10]} with other content; " \
           "bump `version` in #{SHARD_FILE}, or release with --no-tag"
     end
+    local, shared = tag_commits(name, remote)
     TagPlan.new(name, local.nil? && shared.nil?, shared.nil?)
+  end
+
+  def proposal_context(task : Proposal::Task, diff : Array(String), subjects : Array(String),
+                       version : String?, remote : Hash(String, String)?, enforce : Bool) : Proposal::Context
+    floor = ceiling = Proposal::Bump::None
+    if version
+      name = version_tag(version)
+      if tag_commits(name, remote).any?
+        ceiling = Proposal::Bump::Major
+        floor   = Proposal::Bump::Patch if enforce && tag_conflict(name, remote)
+      end
+    end
+    Proposal.context(task, diff, subjects, version, floor, ceiling)
+  end
+
+  def apply_bump(context : Proposal::Context, draft : Proposal::Draft) : String?
+    target = context.target(draft.bump) || return nil
+    write_version(target)
+    target
   end
 
   def tag_steps(plan : TagPlan) : Array(String)
@@ -462,18 +502,51 @@ module Dev::Project
     0
   end
 
-  def cmd_save(message : String, no_add : Bool, no_push : Bool) : Int32
+  def cmd_save(message : String?, no_add : Bool, no_push : Bool) : Int32
     require_repo
     require_dev "save"
     git("add", "-A") unless no_add
     die "nothing to commit" if git("diff", "--cached", "--quiet", check: false).success?
-    git("commit", "-m", message)
+    git("commit", "-m", message || propose_save_message)
     if no_push
       info "committed (not pushed; --no-push)"
     else
       push dev_branch
     end
     0
+  end
+
+  def propose_save_message : String
+    remote  = has_origin? ? remote_tags : nil
+    context = proposal_context(Proposal::Task::Commit, ["--cached"], [] of String,
+      worktree_version, remote, false)
+    draft = Proposal.request(context) ||
+            die "no proposal; your changes are staged — save with -m MSG"
+    accepted = Proposal.confirm(context, draft) ||
+               die "proposal declined; nothing committed (your changes stay staged)"
+    if bumped = apply_bump(context, accepted)
+      info "`#{SHARD_FILE}` version set to `#{bumped}`"
+    end
+    accepted.message
+  end
+
+  def propose_release_title(main : String, remote : Hash(String, String)?, no_tag : Bool) : String?
+    version = no_tag ? nil : committed_version(dev_branch)
+    context = proposal_context(Proposal::Task::Release, [main, dev_branch], pending_subjects(main),
+      version, remote, true)
+    draft = Proposal.request(context)
+    unless draft
+      info "using the auto-drafted title"
+      return nil
+    end
+    accepted = Proposal.confirm(context, draft) || die "release cancelled; nothing changed"
+    if context.target(accepted.bump)
+      checkout dev_branch unless current_branch == dev_branch
+      bumped = apply_bump(context, accepted)
+      git("commit", "-m", "bump version to #{bumped}")
+      ok "`#{SHARD_FILE}` version bumped to `#{bumped}` on `#{dev_branch}`"
+    end
+    accepted.message
   end
 
   def cmd_undo(hard : Bool, target : String?) : Int32
@@ -562,10 +635,16 @@ module Dev::Project
     git("fetch", "origin") if has_origin?
     remote = has_origin? ? remote_tags : nil
     warn_foreign_tags(main, remote)
-    title   = message || (pending_changes?(main) ? auto_release_title(main) : nil)
-    version = title && !no_tag ? committed_version(dev_branch) : nil
-    plan    = version ? plan_tag(version, remote) : nil
-    commit_step = if title
+    pending   = pending_changes?(main)
+    proposing = message.nil? && pending && LLM.available?
+    deferred  = proposing && dry_run
+    message   = propose_release_title(main, remote, no_tag) if proposing && !dry_run
+    title     = message || (pending ? auto_release_title(main) : nil)
+    version   = title && !no_tag ? committed_version(dev_branch) : nil
+    plan      = version && !deferred ? plan_tag(version, remote) : nil
+    commit_step = if deferred
+                    "squash-merge `#{dev_branch}` into `#{main}`, commit: the accepted title"
+                  elsif title
                     "squash-merge `#{dev_branch}` into `#{main}`, commit: #{title.inspect}"
                   else
                     "squash-merge `#{dev_branch}` into `#{main}` (nothing new; `#{main}` unchanged)"
@@ -577,9 +656,14 @@ module Dev::Project
       "push `#{main}`",
     ]
     steps.concat(tag_steps(plan)) if plan
+    steps << "tag the release commit with the #{SHARD_FILE} version (after any accepted bump)" if version && deferred
     steps << "checkout `#{dev_branch}`, reconcile with `merge -s ours #{main}`"
     steps << "push every local branch"
     steps.unshift("create GitHub remote repo (`origin`)") unless has_origin?
+    if deferred
+      steps.unshift("propose a release title and version bump with DeepSeek (`#{LLM.model}`); " \
+                    "an accepted bump is committed on `#{dev_branch}` first")
+    end
     if dry_run
       puts Theme.heading("dry run; would:")
       steps.each_with_index { |step, i| info "  #{i + 1}. #{step}" }
